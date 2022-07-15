@@ -67,6 +67,7 @@ pub struct LinkedHashMap<K: Debug, V: Debug + PartialOrd, S = hash_map::RandomSt
     map: HashMap<KeyRef<K>, *mut Node<K, V>, S>,
 
     head: *mut Head<K, V>,
+    cur:  *mut Node<K, V>,      //支持取出value 使用而不是直接删除
     tail: *mut Node<K, V>,
 }
 
@@ -87,6 +88,7 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
         LinkedHashMap {
             map,
             head: ptr::null_mut(),
+            cur: ptr::null_mut(),
             tail: ptr::null_mut(),
         }
     }
@@ -99,6 +101,7 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
                 self.head = std::alloc::alloc(node_layout) as *mut Head<K, V>;
                 (*self.head).first = ptr::null_mut();
                 (*self.head).cur_time = Instant::now();
+                self.cur = ptr::null_mut();
                 self.tail = ptr::null_mut();
             }
         }
@@ -109,15 +112,21 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
         unsafe {
             let first = (*self.head).first;
             if !first.is_null() {  
+                if first == self.cur {
+                    self.cur = (*first).next
+                }
+
                 (*self.head).first = (*first).next;
                 let first = (*self.head).first;
                 if !first.is_null() {
                     (*self.head).cur_time = (*first).time;
                     (*first).pre = ptr::null_mut();
                 } else {
+                    self.cur = ptr::null_mut();
                     self.tail = ptr::null_mut();
                 }
             } else {
+                self.cur = ptr::null_mut();
                 self.tail = ptr::null_mut();
             }
         }   
@@ -137,6 +146,12 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
 
         if node == self.tail {
             self.tail = ptr::null_mut();
+        }
+
+        unsafe {
+            if node == self.cur {
+                self.cur = (*node).next;
+            }
         }
     }
 
@@ -178,6 +193,15 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
         
         // nodes link to the end of list
         unsafe {
+            if (*self.head).first.is_null() {
+                (*self.head).first = node;
+                (*self.head).cur_time = time;
+            }
+
+            if self.cur.is_null() {
+                self.cur = node;
+            }
+
             if self.tail.is_null() {
                 self.tail = node;
                 (*node).pre = ptr::null_mut();
@@ -185,11 +209,6 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
                 (*self.tail).next = node;
                 (*node).pre = self.tail;
                 self.tail = node;
-            }
-           
-            if (*self.head).first.is_null() {
-                (*self.head).first = node;
-                (*self.head).cur_time = time;
             }
         }
     }
@@ -230,7 +249,7 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
             //从map中移除
             self.map.remove(Qey::from_ref(k));
 
-            //线程链表中删除
+            //从链表中删除
             self.detach(node);
             //释放内存空间
             Self::drop(node);
@@ -247,6 +266,18 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
             .map(|e| unsafe { &mut (**e).value })
     }
 
+    pub fn value_gt<Q: ?Sized>(&self, k: &Q, v: V) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash,
+    {
+        match self.get_mut(k) {
+            Some(value) => (*value) < v,
+            None => true,               //key 不存在的情况也返回true
+        }
+    }
+
+    //panic if key not exists, so make sure the key already exists
     pub fn value_gt_cas<Q: ?Sized>(&self, k: &Q, v: V) -> bool
     where
         K: Borrow<Q>,
@@ -258,6 +289,33 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
         }
 
         return false;
+    }
+
+    pub fn insert_or_gt_cas (&mut self, k: K, v: V) 
+    {
+        if self.contains_key(&k) {
+            self.value_gt_cas(&k, v);
+        } else {
+            self.insert(k, v);
+        }
+    }
+
+    pub fn pop_cur (&mut self) -> Option<(&K, &V)>{
+        if self.cur.is_null() {
+            return None;
+        }
+
+        let cur = self.cur;
+
+        //指针向下移动就可以了
+        unsafe {
+            self.cur = (*self.cur).next;
+        }
+
+        //把当前的(key, value)返回就可以了
+        unsafe {
+            Some((&(*cur).key, &(*cur).value))
+        }
     }
 
     pub fn print(&self) {
@@ -287,7 +345,6 @@ impl <K: Hash + Eq + Debug, V: Debug + PartialOrd, S: BuildHasher> LinkedHashMap
                 first = (*self.head).first;
             }
         }
-        
     }
 
 }
